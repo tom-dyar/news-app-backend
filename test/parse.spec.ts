@@ -77,6 +77,14 @@ describe("normalizeArticle", () => {
 		expect(normalizeArticle({ ...good, published_date: "unknown" }, NOW)?.published_at).toBe("2026-10-26");
 	});
 
+	it("caps field lengths and rejects absurdly long URLs", () => {
+		const long = normalizeArticle({ ...good, headline: "h".repeat(500), source: "s".repeat(500), summary: "x".repeat(5000) }, NOW)!;
+		expect(long.headline).toHaveLength(300);
+		expect(long.source).toHaveLength(120);
+		expect(long.summary).toHaveLength(1200);
+		expect(normalizeArticle({ ...good, url: "https://example.com/" + "a".repeat(2100) }, NOW)).toBeNull();
+	});
+
 	it("rejects non-objects", () => {
 		expect(normalizeArticle(null, NOW)).toBeNull();
 		expect(normalizeArticle("x", NOW)).toBeNull();

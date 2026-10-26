@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { createHandler, type Deps } from "../src/index";
 
 const TOKEN = "test-trigger-token";
@@ -15,6 +15,10 @@ function setup(extra: Partial<Env> = {}) {
 	const e = { DB: env.DB, TRIGGER_TOKEN: TOKEN, ...extra } as Env;
 	return { started, e, handler: createHandler(deps) };
 }
+beforeEach(async () => {
+	await env.DB.prepare("DELETE FROM agent_runs").run();
+});
+
 const req = (path: string, init?: RequestInit) => new Request(`https://news.test${path}`, init);
 const auth = (t = TOKEN) => ({ Authorization: `Bearer ${t}` });
 
@@ -24,7 +28,7 @@ describe("POST /trigger", () => {
 		const none = await handler.fetch(req("/trigger", { method: "POST" }), e);
 		expect(none.status).toBe(401);
 		expect(none.headers.get("www-authenticate")).toContain("Bearer");
-		expect(none.headers.get("access-control-allow-origin")).toBe("*");
+		expect(none.headers.get("access-control-allow-origin")).toBe("https://news-app-frontend.pages.dev");
 		expect((await handler.fetch(req("/trigger", { method: "POST", headers: auth("wrong") }), e)).status).toBe(401);
 		expect(started).toHaveLength(0);
 	});
@@ -42,6 +46,15 @@ describe("POST /trigger", () => {
 		const body = (await res.json()) as any;
 		expect(body).toMatchObject({ status: "queued", runId: "run-123", statusUrl: "https://news.test/trigger/run-123" });
 		expect(started).toEqual([{ source: "trigger" }]);
+	});
+
+	it("refuses a second run within 5 minutes (runaway-automation guard) with 429 + Retry-After", async () => {
+		const { handler, e, started } = setup();
+		expect((await handler.fetch(req("/trigger", { method: "POST", headers: auth() }), e)).status).toBe(202);
+		const again = await handler.fetch(req("/trigger", { method: "POST", headers: auth() }), e);
+		expect(again.status).toBe(429);
+		expect(Number(again.headers.get("retry-after"))).toBeGreaterThan(0);
+		expect(started).toHaveLength(1);
 	});
 
 	it("only allows POST on /trigger", async () => {

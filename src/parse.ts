@@ -38,15 +38,21 @@ export function extractArticles(text: string): Record<string, unknown>[] {
 	return [];
 }
 
-const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+const str = (v: unknown, max = Infinity): string => (typeof v === "string" ? v.trim().slice(0, max) : "");
+
+// Everything here originates from web pages Claude read, so bound it before it reaches the database.
+const MAX_HEADLINE = 300;
+const MAX_SOURCE = 120;
+const MAX_SUMMARY = 1200;
+const MAX_URL = 2000;
 
 export function normalizeArticle(raw: unknown, now: Date): ParsedArticle | null {
 	if (!raw || typeof raw !== "object") return null;
 	const r = raw as Record<string, unknown>;
 
-	const headline = str(r.headline);
+	const headline = str(r.headline, MAX_HEADLINE);
 	const url = str(r.url);
-	if (!headline || !/^https?:\/\/\S+$/i.test(url)) return null;
+	if (!headline || url.length > MAX_URL || !/^https?:\/\/\S+$/i.test(url)) return null;
 	let parsedUrl: URL;
 	try {
 		parsedUrl = new URL(url);
@@ -61,10 +67,10 @@ export function normalizeArticle(raw: unknown, now: Date): ParsedArticle | null 
 
 	return {
 		headline,
-		source: str(r.source) || parsedUrl.hostname.replace(/^www\./, ""),
+		source: str(r.source, MAX_SOURCE) || parsedUrl.hostname.replace(/^www\./, ""),
 		published_at,
 		url,
-		summary: str(r.summary) || null,
+		summary: str(r.summary, MAX_SUMMARY) || null,
 		relevance_score: score,
 	};
 }

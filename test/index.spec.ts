@@ -4,7 +4,13 @@ import { createHandler } from "../src/index";
 import type { NewArticle } from "../src/db";
 import { TOPICS } from "../src/topics";
 
-const req = (path: string, init?: RequestInit) => new Request(`https://news.test${path}`, init);
+const TOKEN = "test-trigger-token";
+const testEnv = { DB: env.DB, TRIGGER_TOKEN: TOKEN } as Env;
+const req = (path: string, init?: RequestInit) => {
+	// /agent now requires the bearer token; attach it for these pipeline tests.
+	const headers = path.startsWith("/agent") && init?.method !== "OPTIONS" ? { Authorization: `Bearer ${TOKEN}`, ...init?.headers } : init?.headers;
+	return new Request(`https://news.test${path}`, { ...init, headers });
+};
 
 function fakeArticles(topicLabel: string, n: number): NewArticle[] {
 	return Array.from({ length: n }, (_, i) => ({
@@ -28,41 +34,41 @@ beforeEach(async () => {
 
 describe("CORS", () => {
 	it("answers preflight", async () => {
-		const res = await handler.fetch(req("/agent", { method: "OPTIONS" }), env);
+		const res = await handler.fetch(req("/agent", { method: "OPTIONS" }), testEnv);
 		expect(res.status).toBe(204);
-		expect(res.headers.get("access-control-allow-origin")).toBe("*");
+		expect(res.headers.get("access-control-allow-origin")).toBe("https://news-app-frontend.pages.dev");
 		expect(res.headers.get("access-control-allow-methods")).toContain("GET");
 	});
 	it("is present on 404 and error responses", async () => {
-		const nf = await handler.fetch(req("/nope"), env);
+		const nf = await handler.fetch(req("/nope"), testEnv);
 		expect(nf.status).toBe(404);
-		expect(nf.headers.get("access-control-allow-origin")).toBe("*");
-		const bad = await handler.fetch(req("/articles?min_score=abc"), env);
+		expect(nf.headers.get("access-control-allow-origin")).toBe("https://news-app-frontend.pages.dev");
+		const bad = await handler.fetch(req("/articles?min_score=abc"), testEnv);
 		expect(bad.status).toBe(400);
-		expect(bad.headers.get("access-control-allow-origin")).toBe("*");
+		expect(bad.headers.get("access-control-allow-origin")).toBe("https://news-app-frontend.pages.dev");
 	});
 });
 
 describe("/health", () => {
 	it("returns status ok and a timestamp", async () => {
-		const res = await handler.fetch(req("/health"), env);
+		const res = await handler.fetch(req("/health"), testEnv);
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { status: string; timestamp: string };
 		expect(body.status).toBe("ok");
 		expect(new Date(body.timestamp).toString()).not.toBe("Invalid Date");
-		expect(res.headers.get("access-control-allow-origin")).toBe("*");
+		expect(res.headers.get("access-control-allow-origin")).toBe("https://news-app-frontend.pages.dev");
 	});
 });
 
 describe("/agent", () => {
 	it("inserts, then skips duplicates on a second run", async () => {
-		const first = (await (await handler.fetch(req("/agent", { method: "POST" }), env)).json()) as any;
+		const first = (await (await handler.fetch(req("/agent", { method: "POST" }), testEnv)).json()) as any;
 		expect(first.inserted).toBe(15);
 		expect(first.skipped).toBe(0);
 		expect(first.totalReturned).toBe(18);
 		expect(first.topics).toHaveLength(TOPICS.length);
 
-		const second = (await (await handler.fetch(req("/agent"), env)).json()) as any;
+		const second = (await (await handler.fetch(req("/agent", { method: "POST" }), testEnv)).json()) as any;
 		expect(second.inserted).toBe(0);
 		expect(second.skipped).toBe(15);
 	});
@@ -74,7 +80,7 @@ describe("/agent", () => {
 				return { articles: fakeArticles(topic.label, 1), returned: 1 };
 			},
 		});
-		const body = (await (await h.fetch(req("/agent"), env)).json()) as any;
+		const body = (await (await h.fetch(req("/agent", { method: "POST" }), testEnv)).json()) as any;
 		expect(body.inserted).toBe(TOPICS.length - 1);
 		expect(body.topics[0].error).toContain("boom");
 	});
@@ -83,39 +89,39 @@ describe("/agent", () => {
 		const h = createHandler({
 			fetchTopicArticles: async (_e, topic) => ({ articles: fakeArticles(topic.label, 25), returned: 25 }),
 		});
-		const body = (await (await h.fetch(req("/agent"), env)).json()) as any;
+		const body = (await (await h.fetch(req("/agent", { method: "POST" }), testEnv)).json()) as any;
 		expect(body.topics[0].removed).toBe(5);
-		const list = (await (await h.fetch(req(`/articles?topic=${encodeURIComponent(TOPICS[0].label)}&limit=200`), env)).json()) as any;
+		const list = (await (await h.fetch(req(`/articles?topic=${encodeURIComponent(TOPICS[0].label)}&limit=200`), testEnv)).json()) as any;
 		expect(list.count).toBe(20);
 	});
 });
 
 describe("/articles", () => {
 	beforeEach(async () => {
-		await handler.fetch(req("/agent"), env);
+		await handler.fetch(req("/agent", { method: "POST" }), testEnv);
 	});
 
 	it("returns articles and a count", async () => {
-		const body = (await (await handler.fetch(req("/articles"), env)).json()) as any;
+		const body = (await (await handler.fetch(req("/articles"), testEnv)).json()) as any;
 		expect(body.count).toBe(15);
 		expect(body.articles).toHaveLength(15);
 		expect(body.articles[0]).toHaveProperty("headline");
 	});
 
 	it("filters by topic id, limit, source, and min score", async () => {
-		const byTopic = (await (await handler.fetch(req(`/articles?topic=${TOPICS[1].id}`), env)).json()) as any;
+		const byTopic = (await (await handler.fetch(req(`/articles?topic=${TOPICS[1].id}`), testEnv)).json()) as any;
 		expect(byTopic.count).toBe(5);
-		const lim = (await (await handler.fetch(req("/articles?limit=3"), env)).json()) as any;
+		const lim = (await (await handler.fetch(req("/articles?limit=3"), testEnv)).json()) as any;
 		expect(lim.count).toBe(3);
-		const none = (await (await handler.fetch(req("/articles?min_score=9"), env)).json()) as any;
+		const none = (await (await handler.fetch(req("/articles?min_score=9"), testEnv)).json()) as any;
 		expect(none.count).toBe(0);
-		const src = (await (await handler.fetch(req("/articles?source=fake"), env)).json()) as any;
+		const src = (await (await handler.fetch(req("/articles?source=fake"), testEnv)).json()) as any;
 		expect(src.count).toBe(15);
 	});
 
 	it("validates parameters", async () => {
 		for (const q of ["limit=0", "limit=abc", "min_score=11", "from=yesterday", "to=2026-13-45"]) {
-			expect((await handler.fetch(req(`/articles?${q}`), env)).status).toBe(400);
+			expect((await handler.fetch(req(`/articles?${q}`), testEnv)).status).toBe(400);
 		}
 	});
 });
