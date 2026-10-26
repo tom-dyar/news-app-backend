@@ -13,6 +13,8 @@
 	"upload_source_maps": true,
 	// Fires at 11:00 and 12:00 UTC; the handler only runs the one that is 7 AM in America/New_York (DST-safe).
 	"triggers": { "crons": ["0 11,12 * * *"] },
+	// Background runs started by /trigger and /slack/command (HTTP requests can't outlive their response by more than 30s).
+	"workflows": [{ "name": "news-run", "binding": "NEWS_RUN", "class_name": "NewsRunWorkflow" }],
 	"d1_databases": [
 		{
 			"binding": "DB",
