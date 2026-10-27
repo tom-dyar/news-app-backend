@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMessages, matchesQuestion, parseChatRequest, selectContext, sseEvent, SYSTEM_PROMPT } from "../src/chat";
+import { buildMessages, contextStats, estimateTokens, matchesQuestion, parseChatRequest, selectContext, sseEvent, SYSTEM_PROMPT, systemPrompt } from "../src/chat";
 import type { ArticleRow } from "../src/db";
 
 const NOW = new Date("2026-10-27T12:00:00Z");
@@ -48,6 +48,12 @@ describe("parseChatRequest", () => {
 		expect(err({ question: "q", topic: "nope" })).toMatch(/topic/);
 		for (const n of [0, 21, 1.5, "5"]) expect(err({ question: "q", max_articles: n })).toMatch(/max_articles/);
 		expect(err({ question: "q", stream: "yes" })).toMatch(/stream/);
+	});
+	it("web_search defaults to off, accepts a boolean, rejects anything else", () => {
+		expect(ok({ question: "q" }).webSearch).toBe(false);
+		expect(ok({ question: "q", web_search: true }).webSearch).toBe(true);
+		expect(ok({ question: "q", web_search: false }).webSearch).toBe(false);
+		for (const bad of ["yes", 1, null]) expect(err({ question: "q", web_search: bad })).toMatch(/web_search/);
 	});
 	it("validates conversation history", () => {
 		const history = [{ role: "user", content: "hi" }, { role: "assistant", content: "hello" }];
@@ -167,5 +173,37 @@ describe("buildMessages retrieval note", () => {
 describe("sseEvent", () => {
 	it("formats a named event with a JSON payload and a blank-line terminator", () => {
 		expect(sseEvent("delta", { text: "hi\nthere" })).toBe('event: delta\ndata: {"text":"hi\\nthere"}\n\n');
+	});
+});
+
+describe("systemPrompt", () => {
+	it("is the plain prompt when web search is off", () => {
+		expect(systemPrompt(false)).toBe(SYSTEM_PROMPT);
+		expect(systemPrompt(false)).not.toMatch(/web search/i);
+	});
+	it("adds guidance for when to search, how to cite web results, and that they are untrusted", () => {
+		const p = systemPrompt(true);
+		expect(p.startsWith(SYSTEM_PROMPT)).toBe(true);
+		expect(p).toMatch(/web search/i);
+		expect(p).toMatch(/do not mention|not in the articles|do not cover|doesn't cover/i);
+		expect(p).toMatch(/markdown link/i);
+		expect(p).toMatch(/untrusted/i);
+		expect(p).toMatch(/from the web|web sources?/i);
+	});
+});
+
+describe("context size estimates", () => {
+	it("estimateTokens grows with text length and is zero for empty text", () => {
+		expect(estimateTokens("")).toBe(0);
+		expect(estimateTokens("a".repeat(400))).toBeGreaterThan(estimateTokens("a".repeat(40)));
+		expect(Number.isInteger(estimateTokens("hello world"))).toBe(true);
+	});
+	it("contextStats reports articles used, articles available, and a token estimate that scales with the articles", () => {
+		const one = contextStats([art()], 55);
+		const five = contextStats([art(), art(), art(), art(), art()], 55);
+		expect(one).toMatchObject({ articles: 1, candidates: 55 });
+		expect(one.approxTokens).toBeGreaterThan(0);
+		expect(five.approxTokens).toBeGreaterThan(one.approxTokens * 3);
+		expect(contextStats([], 0)).toEqual({ articles: 0, candidates: 0, approxTokens: 0 });
 	});
 });

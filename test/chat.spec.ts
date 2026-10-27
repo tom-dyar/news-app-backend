@@ -14,12 +14,12 @@ const article = (n: number, over: Partial<NewArticle> = {}): NewArticle => ({
 	headline: `Headline ${n}`, source: "Src", published_at: "2026-10-26", url: `https://x.test/${n}`, summary: `Summary ${n}`, relevance_score: 5, ...over,
 });
 
-interface Captured { calls: Array<{ model: string; fallbacks: boolean; system: string; messages: any[] }> }
+interface Captured { calls: Array<{ model: string; fallbacks: boolean; webSearch: boolean; system: string; messages: any[] }> }
 function make(events: ChatEvent[] | (() => AsyncGenerator<ChatEvent>), cap: Captured = { calls: [] }, failWith?: ChatError) {
 	const deps: Deps = {
 		fetchTopicArticles: async () => ({ articles: [], returned: 0 }),
 		streamChat: async (_env, call) => {
-			cap.calls.push({ model: call.model.id, fallbacks: call.model.fallbacks, system: call.system, messages: call.messages });
+			cap.calls.push({ model: call.model.id, fallbacks: call.model.fallbacks, webSearch: call.webSearch, system: call.system, messages: call.messages });
 			if (failWith) throw failWith;
 			return typeof events === "function" ? events() : (async function* () { yield* events; })();
 		},
@@ -153,6 +153,71 @@ describe("POST /chat streaming (default)", () => {
 		expect(events.map((x) => x.event)).toEqual(["meta", "delta", "done"]);
 		expect(events[1].data.text).toMatch(/no articles/i);
 		expect(events[0].data.sources).toEqual([]);
+	});
+});
+
+describe("POST /chat context stats", () => {
+	it("reports in meta how many articles were pulled, how many are stored, and an approximate token count", async () => {
+		const { handler } = make([DONE]);
+		const meta = parseSse(await (await handler.fetch(post({ question: "ransomware", max_articles: 2 }), e)).text())[0].data;
+		expect(meta.context).toMatchObject({ articles: 2, candidates: 3 });
+		expect(meta.context.approxTokens).toBeGreaterThan(20);
+		expect(meta.webSearch).toBe(false);
+	});
+	it("includes the same stats in the non-streaming response", async () => {
+		const { handler } = make([DONE]);
+		const body = (await (await handler.fetch(post({ question: "ransomware", stream: false }), e)).json()) as any;
+		expect(body.context).toMatchObject({ articles: 3, candidates: 3 });
+		expect(body.webSearch).toBe(false);
+	});
+});
+
+describe("POST /chat web search", () => {
+	it("is off by default: the model call gets no search tool and no web guidance", async () => {
+		const { handler, cap } = make([DONE]);
+		await handler.fetch(post({ question: "q" }), e);
+		expect(cap.calls[0].webSearch).toBe(false);
+		expect(cap.calls[0].system).not.toMatch(/web search/i);
+	});
+	it("turns on the search tool and the web guidance when requested, and says so in meta", async () => {
+		const { handler, cap } = make([DONE]);
+		const meta = parseSse(await (await handler.fetch(post({ question: "q", web_search: true }), e)).text())[0].data;
+		expect(cap.calls[0].webSearch).toBe(true);
+		expect(cap.calls[0].system).toMatch(/web search/i);
+		expect(meta.webSearch).toBe(true);
+	});
+	it("still calls Claude with no stored articles when web search is on, but not when it is off", async () => {
+		await env.DB.prepare("DELETE FROM articles").run();
+		const off = make([DONE]);
+		await off.handler.fetch(post({ question: "anything" }), e);
+		expect(off.cap.calls).toHaveLength(0);
+		const on = make([DONE]);
+		await on.handler.fetch(post({ question: "anything", web_search: true }), e);
+		expect(on.cap.calls).toHaveLength(1);
+	});
+	it("streams search and web_sources events between meta and the text", async () => {
+		const { handler } = make([
+			{ type: "search", query: "vulnpocalypse healthcare" },
+			{ type: "web_sources", sources: [{ title: "CISA advisory", url: "https://cisa.gov/x" }] },
+			{ type: "delta", text: "Answer" },
+			{ type: "done", stopReason: "end_turn", usage: { input_tokens: 10, output_tokens: 5, web_searches: 1 }, model: "claude-sonnet-5-5" },
+		]);
+		const events = parseSse(await (await handler.fetch(post({ question: "q", web_search: true }), e)).text());
+		expect(events.map((x) => x.event)).toEqual(["meta", "search", "web_sources", "delta", "done"]);
+		expect(events[1].data).toEqual({ query: "vulnpocalypse healthcare" });
+		expect(events[2].data.sources[0]).toEqual({ title: "CISA advisory", url: "https://cisa.gov/x" });
+		expect(events[4].data.usage.web_searches).toBe(1);
+	});
+	it("collects searches and web sources in the non-streaming response", async () => {
+		const { handler } = make([
+			{ type: "search", query: "a" }, { type: "search", query: "b" },
+			{ type: "web_sources", sources: [{ title: "T", url: "https://t.test/" }] },
+			{ type: "delta", text: "Hi" }, DONE,
+		]);
+		const body = (await (await handler.fetch(post({ question: "q", web_search: true, stream: false }), e)).json()) as any;
+		expect(body.searches).toEqual(["a", "b"]);
+		expect(body.webSources).toEqual([{ title: "T", url: "https://t.test/" }]);
+		expect(body.answer).toBe("Hi");
 	});
 });
 

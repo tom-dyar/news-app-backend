@@ -1,7 +1,7 @@
 import { runAgent, type FetchTopicArticles } from "./agent";
 import { fetchTopicArticles, streamChat as streamClaudeChat } from "./anthropic";
 import { bearerMatches, verifySlackSignature } from "./auth";
-import { ChatError, SYSTEM_PROMPT, buildMessages, matchesQuestion, parseChatRequest, selectContext, sseEvent, type ChatCall, type ChatEvent } from "./chat";
+import { ChatError, buildMessages, contextStats, matchesQuestion, parseChatRequest, selectContext, sseEvent, systemPrompt, type ChatCall, type ChatEvent, type WebSource } from "./chat";
 import { queryArticles } from "./db";
 import { DEFAULT_MODEL_ALIAS, MODELS } from "./models";
 import { claimRun } from "./runs";
@@ -135,15 +135,16 @@ export function createHandler(deps: Deps) {
 		}
 		const parsed = parseChatRequest(body);
 		if (!parsed.ok) return json({ error: parsed.error }, 400);
-		const { question, model, history, topic, maxArticles, stream } = parsed.value;
+		const { question, model, history, topic, maxArticles, stream, webSearch } = parsed.value;
 
 		const candidates = await queryArticles(env.DB, { topic, limit: CHAT_CANDIDATES });
 		const articles = selectContext(candidates, question, maxArticles);
+		const context = contextStats(articles, candidates.length);
 		const sources = articles.map((a, i) => ({ n: i + 1, id: a.id, headline: a.headline, source: a.source, url: a.url, published_at: a.published_at, topic: a.topic, relevance_score: a.relevance_score }));
 
 		// Pull the first event before committing to a 200 so a rejected request becomes a proper HTTP error.
 		let events: AsyncGenerator<ChatEvent, void, undefined>;
-		if (articles.length === 0) {
+		if (articles.length === 0 && !webSearch) {
 			events = (async function* (): AsyncGenerator<ChatEvent, void, undefined> {
 				yield { type: "delta", text: NO_ARTICLES_ANSWER };
 				yield { type: "done", stopReason: "end_turn", usage: { input_tokens: 0, output_tokens: 0 }, model: model.id };
@@ -152,7 +153,7 @@ export function createHandler(deps: Deps) {
 			try {
 				const today = new Date().toISOString().slice(0, 10);
 				const loose = !articles.some((a) => matchesQuestion(a, question));
-				const call: ChatCall = { model, system: SYSTEM_PROMPT, messages: buildMessages(history, articles, question, today, loose) };
+				const call: ChatCall = { model, webSearch, system: systemPrompt(webSearch), messages: buildMessages(history, articles, question, today, loose) };
 				const iterator = (await streamChat(env, call))[Symbol.asyncIterator]();
 				const first = await iterator.next();
 				events = (async function* (): AsyncGenerator<ChatEvent, void, undefined> {
@@ -167,21 +168,33 @@ export function createHandler(deps: Deps) {
 
 		if (!stream) {
 			let answer = "";
+			const searches: string[] = [];
+			const webSources: WebSource[] = [];
 			let done: Extract<ChatEvent, { type: "done" }> | undefined;
 			try {
-				for await (const e of events) e.type === "delta" ? (answer += e.text) : (done = e);
+				for await (const e of events) {
+					if (e.type === "delta") answer += e.text;
+					else if (e.type === "search") searches.push(e.query);
+					else if (e.type === "web_sources") webSources.push(...e.sources);
+					else done = e;
+				}
 			} catch (err) {
 				console.error("chat: stream failed:", err);
 				return json({ error: "The model response was interrupted. Try again." }, 502);
 			}
-			return json({ answer, sources, model: done?.model ?? model.id, stopReason: done?.stopReason ?? null, usage: done?.usage });
+			return json({ answer, sources, context, webSearch, searches, webSources, model: done?.model ?? model.id, stopReason: done?.stopReason ?? null, usage: done?.usage });
 		}
 
 		const encoder = new TextEncoder();
 		async function* frames(): AsyncGenerator<string> {
-			yield sseEvent("meta", { model: model.id, sources });
+			yield sseEvent("meta", { model: model.id, sources, context, webSearch });
 			try {
-				for await (const e of events) yield e.type === "delta" ? sseEvent("delta", { text: e.text }) : sseEvent("done", { stopReason: e.stopReason, usage: e.usage, model: e.model });
+				for await (const e of events) {
+					if (e.type === "delta") yield sseEvent("delta", { text: e.text });
+					else if (e.type === "search") yield sseEvent("search", { query: e.query });
+					else if (e.type === "web_sources") yield sseEvent("web_sources", { sources: e.sources });
+					else yield sseEvent("done", { stopReason: e.stopReason, usage: e.usage, model: e.model });
+				}
 			} catch (err) {
 				console.error("chat: stream failed:", err);
 				yield sseEvent("error", { message: "The response was interrupted. Try again." });
