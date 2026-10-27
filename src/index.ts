@@ -1,7 +1,9 @@
 import { runAgent, type FetchTopicArticles } from "./agent";
-import { fetchTopicArticles } from "./anthropic";
+import { fetchTopicArticles, streamChat as streamClaudeChat } from "./anthropic";
 import { bearerMatches, verifySlackSignature } from "./auth";
+import { ChatError, SYSTEM_PROMPT, buildMessages, parseChatRequest, selectContext, sseEvent, type ChatCall, type ChatEvent } from "./chat";
 import { queryArticles } from "./db";
+import { DEFAULT_MODEL_ALIAS, MODELS } from "./models";
 import { claimRun } from "./runs";
 import { isSevenAmEastern } from "./schedule";
 import { resolveTopic } from "./topics";
@@ -84,7 +86,17 @@ export interface Deps {
 	startRun?: (env: Env, params: RunParams) => Promise<string>;
 	/** Look up a background run; null when the id is unknown. */
 	getRun?: (env: Env, id: string) => Promise<RunStatus | null>;
+	/** Stream an answer from Claude. Throws ChatError for failures before streaming starts. */
+	streamChat?: (env: Env, call: ChatCall) => Promise<AsyncIterable<ChatEvent>>;
 }
+
+/** Chat requests are small; refuse anything larger without parsing it. */
+const MAX_CHAT_BODY_BYTES = 64 * 1024;
+/** How many of the newest stored articles are considered when picking context (the database keeps ~20 per topic). */
+const CHAT_CANDIDATES = 100;
+const NO_ARTICLES_ANSWER = "There are no articles in the database yet. Run a refresh to collect recent news, then ask again.";
+
+const SSE_HEADERS = { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" };
 
 const startWorkflowRun = async (env: Env, params: RunParams) => (await env.NEWS_RUN.create({ params })).id;
 
@@ -110,6 +122,81 @@ const tooSoon = (retryAfterSeconds: number) => json({ error: "a run started rece
 export function createHandler(deps: Deps) {
 	const startRun = deps.startRun ?? startWorkflowRun;
 	const getRun = deps.getRun ?? getWorkflowRun;
+	const streamChat = deps.streamChat ?? streamClaudeChat;
+
+	async function handleChat(request: Request, env: Env): Promise<Response> {
+		const raw = Number(request.headers.get("Content-Length")) > MAX_CHAT_BODY_BYTES ? null : await request.text();
+		if (raw === null || raw.length > MAX_CHAT_BODY_BYTES) return json({ error: "request body too large" }, 413);
+		let body: unknown;
+		try {
+			body = JSON.parse(raw);
+		} catch {
+			return json({ error: "request body must be valid JSON" }, 400);
+		}
+		const parsed = parseChatRequest(body);
+		if (!parsed.ok) return json({ error: parsed.error }, 400);
+		const { question, model, history, topic, maxArticles, stream } = parsed.value;
+
+		const candidates = await queryArticles(env.DB, { topic, limit: CHAT_CANDIDATES });
+		const articles = selectContext(candidates, question, maxArticles);
+		const sources = articles.map((a, i) => ({ n: i + 1, id: a.id, headline: a.headline, source: a.source, url: a.url, published_at: a.published_at, topic: a.topic, relevance_score: a.relevance_score }));
+
+		// Pull the first event before committing to a 200 so a rejected request becomes a proper HTTP error.
+		let events: AsyncGenerator<ChatEvent, void, undefined>;
+		if (articles.length === 0) {
+			events = (async function* (): AsyncGenerator<ChatEvent, void, undefined> {
+				yield { type: "delta", text: NO_ARTICLES_ANSWER };
+				yield { type: "done", stopReason: "end_turn", usage: { input_tokens: 0, output_tokens: 0 }, model: model.id };
+			})();
+		} else {
+			try {
+				const call: ChatCall = { model, system: SYSTEM_PROMPT, messages: buildMessages(history, articles, question, new Date().toISOString().slice(0, 10)) };
+				const iterator = (await streamChat(env, call))[Symbol.asyncIterator]();
+				const first = await iterator.next();
+				events = (async function* (): AsyncGenerator<ChatEvent, void, undefined> {
+					if (!first.done) yield first.value;
+					for (let next = await iterator.next(); !next.done; next = await iterator.next()) yield next.value;
+				})();
+			} catch (err) {
+				if (err instanceof ChatError) return json({ error: err.message }, err.status === 429 ? 429 : 502);
+				return json({ error: "The model request failed. Try again, or choose a different model." }, 502);
+			}
+		}
+
+		if (!stream) {
+			let answer = "";
+			let done: Extract<ChatEvent, { type: "done" }> | undefined;
+			try {
+				for await (const e of events) e.type === "delta" ? (answer += e.text) : (done = e);
+			} catch (err) {
+				console.error("chat: stream failed:", err);
+				return json({ error: "The model response was interrupted. Try again." }, 502);
+			}
+			return json({ answer, sources, model: done?.model ?? model.id, stopReason: done?.stopReason ?? null, usage: done?.usage });
+		}
+
+		const encoder = new TextEncoder();
+		async function* frames(): AsyncGenerator<string> {
+			yield sseEvent("meta", { model: model.id, sources });
+			try {
+				for await (const e of events) yield e.type === "delta" ? sseEvent("delta", { text: e.text }) : sseEvent("done", { stopReason: e.stopReason, usage: e.usage, model: e.model });
+			} catch (err) {
+				console.error("chat: stream failed:", err);
+				yield sseEvent("error", { message: "The response was interrupted. Try again." });
+			}
+		}
+		const gen = frames();
+		return new Response(
+			new ReadableStream<Uint8Array>({
+				async pull(controller) {
+					const next = await gen.next();
+					next.done ? controller.close() : controller.enqueue(encoder.encode(next.value));
+				},
+				cancel: () => void gen.return(undefined),
+			}),
+			{ headers: SSE_HEADERS },
+		);
+	}
 
 	async function handleSlack(request: Request, env: Env): Promise<Response> {
 		if (!env.SLACK_SIGNING_SECRET) return json({ error: "slack integration is not configured" }, 503);
@@ -163,6 +250,14 @@ export function createHandler(deps: Deps) {
 			}
 			case "/slack/command":
 				return isPost ? handleSlack(request, env) : notAllowed();
+			case "/chat": {
+				// Costs Anthropic credits, so it needs the same password as the pipeline.
+				const denied = await requireToken(request, env);
+				if (denied) return denied;
+				return isPost ? handleChat(request, env) : notAllowed();
+			}
+			case "/chat/models":
+				return json({ default: DEFAULT_MODEL_ALIAS, models: MODELS.map(({ alias, id, label }) => ({ alias, id, label })) });
 			default: {
 				if (url.pathname.startsWith("/trigger/")) {
 					if (request.method !== "GET") return notAllowed();
@@ -172,7 +267,7 @@ export function createHandler(deps: Deps) {
 					const run = await getRun(env, runId);
 					return run ? json({ runId, ...run }) : json({ error: "run not found" }, 404);
 				}
-				return json({ error: "not found", endpoints: ["/health", "/articles"] }, 404);
+				return json({ error: "not found", endpoints: ["/health", "/articles", "/chat/models"] }, 404);
 			}
 		}
 	}

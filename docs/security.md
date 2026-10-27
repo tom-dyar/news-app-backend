@@ -7,8 +7,10 @@
 | Endpoint              | Who can call it                | Limits                                           |
 | --------------------- | ------------------------------ | ------------------------------------------------ |
 | `GET /health`         | Anyone                         | Read-only                                        |
+| `GET /chat/models`    | Anyone                         | Read-only list of selectable models              |
 | `GET /articles`       | Anyone                         | Read-only, validated parameters                  |
 | `POST /agent`         | Bearer token                   | Full detail. Logged.                             |
+| `POST /chat`          | Bearer token (the password)    | Uses Anthropic credits. Body limited to 64 KB.   |
 | `POST /trigger`       | Bearer token                   | One run per 5 minutes                            |
 | `GET /trigger/{id}`   | Bearer token                   | Read-only                                        |
 | `POST /slack/command` | Signed by Slack, optional list | One run per 5 minutes                            |

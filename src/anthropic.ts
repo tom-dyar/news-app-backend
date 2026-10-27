@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { extractArticles, extractText, normalizeArticle, type ParsedArticle } from "./parse";
+import { ChatError, type ChatCall, type ChatEvent } from "./chat";
 import type { Topic } from "./topics";
 
 // Sonnet 5.5: supports web_search_20260209 and is well within this workspace's rate limits (Opus 5.5 is set to 0 RPM there).
@@ -60,4 +61,53 @@ export async function fetchTopicArticles(env: Pick<Env, "ANTHROPIC_API_KEY">, to
 	const articles = raw.map((r) => normalizeArticle(r, now)).filter((a): a is ParsedArticle => a !== null);
 	const note = articles.length === 0 ? `stop_reason=${stopReason}; reply: ${text.slice(0, 400) || "(no text)"}` : undefined;
 	return { articles, returned: raw.length, note };
+}
+
+function toChatError(err: unknown): ChatError {
+	console.error("chat: upstream error:", err instanceof Error ? err.message : err);
+	const status = err instanceof Anthropic.APIError ? (err.status ?? 502) : 502;
+	if (status === 429) return new ChatError(429, "The model is rate limited right now. Try again shortly or choose a different model.");
+	return new ChatError(502, "The model request failed. Try again, or choose a different model.");
+}
+
+/**
+ * Stream an answer from Claude. HTTP-level failures (rate limit, bad key, ...) throw a ChatError before this
+ * resolves so the caller can return a real HTTP status; failures after streaming starts surface while iterating.
+ */
+export async function streamChat(env: Pick<Env, "ANTHROPIC_API_KEY">, call: ChatCall): Promise<AsyncIterable<ChatEvent>> {
+	const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 1 });
+	let stream;
+	try {
+		stream = await client.beta.messages.create({
+			model: call.model.id,
+			max_tokens: 4096,
+			stream: true,
+			system: call.system,
+			messages: call.messages,
+			// Answering from supplied context needs little deliberation; keep time-to-first-token low.
+			output_config: { effort: "low" },
+			// If a safety classifier declines, let the API re-run the request on its fallback model (not offered for Haiku).
+			...(call.model.fallbacks && { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const }),
+		});
+	} catch (err) {
+		throw toChatError(err);
+	}
+
+	return (async function* () {
+		let model: string = call.model.id;
+		let stopReason: string | null = null;
+		const usage = { input_tokens: 0, output_tokens: 0 };
+		for await (const event of stream) {
+			if (event.type === "message_start") {
+				model = event.message.model;
+				usage.input_tokens = event.message.usage.input_tokens;
+			} else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+				yield { type: "delta", text: event.delta.text };
+			} else if (event.type === "message_delta") {
+				stopReason = event.delta.stop_reason;
+				usage.output_tokens = event.usage.output_tokens;
+			}
+		}
+		yield { type: "done", stopReason, usage, model };
+	})();
 }
