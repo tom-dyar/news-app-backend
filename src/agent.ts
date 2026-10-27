@@ -51,16 +51,6 @@ export async function runAgent(env: Env, fetchTopic: FetchTopicArticles): Promis
 	return summarize(await Promise.all(TOPICS.map((topic) => runTopic(env, topic, fetchTopic))));
 }
 
-/** Counts only. For unauthenticated callers: upstream error text, request ids and model output must not leak. */
-export function publicSummary(s: AgentSummary) {
-	return {
-		inserted: s.inserted,
-		skipped: s.skipped,
-		totalReturned: s.totalReturned,
-		topics: s.topics.map((t) => ({ topic: t.topic, returned: t.returned, inserted: t.inserted, skipped: t.skipped, failed: Boolean(t.error) })),
-	};
-}
-
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /** Plain-text result for chat messages (Slack mrkdwn). */

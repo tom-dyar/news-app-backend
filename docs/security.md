@@ -8,7 +8,6 @@
 | --------------------- | ------------------------------ | ------------------------------------------------ |
 | `GET /health`         | Anyone                         | Read-only                                        |
 | `GET /articles`       | Anyone                         | Read-only, validated parameters                  |
-| `POST /refresh`       | Anyone (the dashboard button)  | One run per hour for everyone. Counts only.      |
 | `POST /agent`         | Bearer token                   | Full detail. Logged.                             |
 | `POST /trigger`       | Bearer token                   | One run per 5 minutes                            |
 | `GET /trigger/{id}`   | Bearer token                   | Read-only                                        |
@@ -29,7 +28,7 @@ with a single SQL statement, so simultaneous requests cannot both start a run.
 - **CORS** allows only the dashboard origin (and `localhost` for development), never `*`.
 - **Responses** carry `nosniff`, `Referrer-Policy: no-referrer`, a deny-all CSP, and
   `no-store` on anything that is not a plain GET.
-- **Anonymous callers** never see upstream error text, request IDs or model output.
+- **The pipeline cannot be run anonymously.** There is no public way to start a run; `/health` and `/articles` are the only open endpoints and are read-only.
 - **SQL** is fully parameterized. `LIKE` filters escape wildcards. Query inputs are
   validated and length-limited.
 - **Untrusted web content**: article text comes from web pages that Claude read, so it is
@@ -40,10 +39,7 @@ with a single SQL statement, so simultaneous requests cannot both start a run.
 
 ## Risks that remain
 
-- **Anyone can still trigger one run per hour** through `POST /refresh`. The worst-case
-  cost is one pipeline run per hour. To remove even that, put the dashboard behind
-  Cloudflare Access, or drop the public Refresh button and rely on the 7 AM run plus
-  `/trigger`.
+- **The password is stored in the owner's browser** (`localStorage`) after the first Refresh, so anyone using that browser can refresh. The dashboard page itself never contains it, and the CSP blocks inline and third-party scripts. Use "Refresh" on a shared computer only if you are comfortable with that, or clear site data afterwards.
 - **The Cloudflare API token in `.env`** is probably broader than the deploy needs.
   Replace it with a token limited to Workers Scripts, D1 and Pages edit permissions for
   this account.

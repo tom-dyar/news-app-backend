@@ -1,4 +1,4 @@
-import { publicSummary, runAgent, type FetchTopicArticles } from "./agent";
+import { runAgent, type FetchTopicArticles } from "./agent";
 import { fetchTopicArticles } from "./anthropic";
 import { bearerMatches, verifySlackSignature } from "./auth";
 import { queryArticles } from "./db";
@@ -14,8 +14,6 @@ export { NewsRunWorkflow } from "./workflow";
 const DASHBOARD_ORIGIN = "https://news-app-frontend.pages.dev";
 const ALLOWED_ORIGIN = /^(https:\/\/([a-z0-9-]+\.)?news-app-frontend\.pages\.dev|http:\/\/localhost(:\d+)?)$/;
 
-/** Minimum gap between runs started from the public dashboard button. */
-const PUBLIC_REFRESH_GAP_SECONDS = 60 * 60;
 /** Minimum gap between runs started through /trigger or Slack: stops a looping automation from running up costs. */
 const AUTOMATION_GAP_SECONDS = 5 * 60;
 
@@ -145,25 +143,19 @@ export function createHandler(deps: Deps) {
 				return json({ status: "ok", service: "news-app-backend", timestamp: new Date().toISOString() });
 			case "/articles":
 				return request.method === "GET" ? handleArticles(url, env) : notAllowed();
-			case "/refresh": {
-				// Public (the dashboard's Refresh button), so it is rate limited and reveals only counts.
-				if (!isPost) return notAllowed();
-				const claim = await claimRun(env.DB, "public", PUBLIC_REFRESH_GAP_SECONDS);
-				if (!claim.claimed) return tooSoon(claim.retryAfterSeconds);
-				return json(publicSummary(await runAgent(env, deps.fetchTopicArticles)));
-			}
 			case "/agent": {
-				// Synchronous run for the token holder, with full detail.
-				if (!isPost) return notAllowed();
+				// Synchronous run, only for callers that present the password. Auth comes before the method check
+				// so an unauthenticated request always gets 401, never a hint about what the endpoint accepts.
 				const denied = await requireToken(request, env);
 				if (denied) return denied;
+				if (!isPost) return notAllowed();
 				await claimRun(env.DB, "agent", 0);
 				return json(await runAgent(env, deps.fetchTopicArticles));
 			}
 			case "/trigger": {
-				if (!isPost) return notAllowed();
 				const denied = await requireToken(request, env);
 				if (denied) return denied;
+				if (!isPost) return notAllowed();
 				const claim = await claimRun(env.DB, "trigger", AUTOMATION_GAP_SECONDS);
 				if (!claim.claimed) return tooSoon(claim.retryAfterSeconds);
 				const runId = await startRun(env, { source: "trigger" });
@@ -180,7 +172,7 @@ export function createHandler(deps: Deps) {
 					const run = await getRun(env, runId);
 					return run ? json({ runId, ...run }) : json({ error: "run not found" }, 404);
 				}
-				return json({ error: "not found", endpoints: ["/health", "/articles", "/refresh"] }, 404);
+				return json({ error: "not found", endpoints: ["/health", "/articles"] }, 404);
 			}
 		}
 	}

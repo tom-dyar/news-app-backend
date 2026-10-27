@@ -17,7 +17,7 @@ Base URL: `https://news-app-backend.tom-dyar.workers.dev`
 | `POST /slack/command`  | Slack request signature | Slack slash command (needs Slack setup, below). |
 | `POST /agent`          | `Authorization: Bearer` | Run synchronously (waits for the result).       |
 
-Without a valid token, `/trigger` and `/agent` return `401`. `/trigger` and Slack
+Without a valid token, `/trigger` and `/agent` return `401` for every method. `/trigger` and Slack
 allow one run per 5 minutes (`429` with `Retry-After` otherwise), which stops a
 looping automation from running up costs. If `TRIGGER_TOKEN` is not set on the Worker,
 it returns `503` rather than running open.

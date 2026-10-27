@@ -1,7 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createHandler } from "../src/index";
-import { publicSummary, summarize } from "../src/agent";
 import type { NewArticle } from "../src/db";
 import { TOPICS } from "../src/topics";
 
@@ -30,10 +29,18 @@ beforeEach(async () => {
 });
 
 describe("/agent is token-protected", () => {
-	it("rejects anonymous POST (401) and any GET (405) without running the pipeline", async () => {
-		expect((await handler.fetch(req("/agent", { method: "POST" }), e)).status).toBe(401);
+	it("rejects every request without the correct password with 401, whatever the method", async () => {
+		for (const method of ["POST", "GET", "PUT"]) {
+			const res = await handler.fetch(req("/agent", { method }), e);
+			expect(res.status).toBe(401);
+			expect(res.headers.get("www-authenticate")).toContain("Bearer");
+		}
 		expect((await handler.fetch(req("/agent", { method: "POST", headers: { Authorization: "Bearer wrong" } }), e)).status).toBe(401);
-		expect((await handler.fetch(req("/agent"), e)).status).toBe(405);
+		expect((await handler.fetch(req("/agent", { method: "POST", headers: { Authorization: `Bearer ${TOKEN}x` } }), e)).status).toBe(401);
+		expect(calls).toBe(0);
+	});
+	it("runs only with the password, and only for POST", async () => {
+		expect((await handler.fetch(req("/agent", { headers: { Authorization: `Bearer ${TOKEN}` } }), e)).status).toBe(405);
 		expect(calls).toBe(0);
 	});
 	it("runs with a valid token and returns full detail", async () => {
@@ -47,48 +54,16 @@ describe("/agent is token-protected", () => {
 	});
 });
 
-describe("POST /refresh (public, rate limited)", () => {
-	it("only accepts POST", async () => {
-		expect((await handler.fetch(req("/refresh"), e)).status).toBe(405);
-	});
-
-	it("runs once, then refuses with 429 + Retry-After during the cooldown", async () => {
-		const first = await handler.fetch(req("/refresh", { method: "POST" }), e);
-		expect(first.status).toBe(200);
-		const callsAfterFirst = calls;
-		const second = await handler.fetch(req("/refresh", { method: "POST" }), e);
-		expect(second.status).toBe(429);
-		expect(Number(second.headers.get("retry-after"))).toBeGreaterThan(0);
-		expect(((await second.json()) as any).retryAfterSeconds).toBeGreaterThan(0);
-		expect(calls).toBe(callsAfterFirst);
-	});
-
-	it("never leaks upstream error text, request ids or model output", async () => {
-		const res = await handler.fetch(req("/refresh", { method: "POST" }), e);
-		const text = await res.text();
-		expect(text).not.toContain("req_SECRET123");
-		expect(text).not.toContain("rate_limit_error");
-		expect(text).not.toContain("secret model text");
-		const body = JSON.parse(text);
-		expect(body.topics[0]).toMatchObject({ failed: true });
-		expect(body.inserted).toBe(TOPICS.length - 1);
-	});
-
-	it("a recent scheduled-style claim also blocks public refresh", async () => {
-		const now = Math.floor(Date.now() / 1000);
-		await env.DB.prepare("INSERT INTO agent_runs (started_at, source) VALUES (?, 'cron')").bind(now - 60).run();
-		expect((await handler.fetch(req("/refresh", { method: "POST" }), e)).status).toBe(429);
+describe("there is no public way to run the pipeline", () => {
+	it.each(["GET", "POST"])("%s /refresh no longer exists", async (method) => {
+		const res = await handler.fetch(req("/refresh", { method }), e);
+		expect(res.status).toBe(404);
 		expect(calls).toBe(0);
 	});
-});
-
-describe("publicSummary", () => {
-	it("keeps counts, drops error/note text", () => {
-		const s = summarize([{ topic: "t", returned: 2, inserted: 1, skipped: 1, invalid: 0, removed: 3, note: "n", error: "boom" }]);
-		const p = publicSummary(s) as any;
-		expect(JSON.stringify(p)).not.toContain("boom");
-		expect(JSON.stringify(p)).not.toContain("removed");
-		expect(p.topics[0]).toEqual({ topic: "t", returned: 2, inserted: 1, skipped: 1, failed: true });
+	it("public endpoints stay public and never start a run", async () => {
+		expect((await handler.fetch(req("/health"), e)).status).toBe(200);
+		expect((await handler.fetch(req("/articles?limit=1"), e)).status).toBe(200);
+		expect(calls).toBe(0);
 	});
 });
 
