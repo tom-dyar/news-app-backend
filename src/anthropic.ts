@@ -84,8 +84,8 @@ export async function streamChat(env: Pick<Env, "ANTHROPIC_API_KEY">, call: Chat
 			stream: true,
 			system: call.system,
 			messages: call.messages,
-			// Answering from supplied context needs little deliberation; keep time-to-first-token low.
-			output_config: { effort: "low" },
+			// Per model: Haiku stays at "low" so it is quick to start; the others use "medium" for advice and analysis.
+			output_config: { effort: call.model.effort },
 			// If a safety classifier declines, let the API re-run the request on its fallback model (not offered for Haiku).
 			...(call.model.fallbacks && { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const }),
 		});

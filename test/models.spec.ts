@@ -16,6 +16,11 @@ describe("resolveModel", () => {
 	it("rejects anything not on the allow-list (no passing arbitrary model strings upstream)", () => {
 		for (const bad of ["gpt-4", "claude-sonnet-5-5-20990101", "claude-fable-5-1", "sonnet; drop", 42, {}, []]) expect(resolveModel(bad)).toBeNull();
 	});
+	it("the fast model keeps low reasoning effort; the others think a little more for advice", () => {
+		expect(resolveModel("haiku")?.effort).toBe("low");
+		expect(resolveModel("sonnet")?.effort).toBe("medium");
+		expect(resolveModel("opus")?.effort).toBe("medium");
+	});
 	it("only Sonnet and Opus use the server-side refusal fallback (Haiku has none)", () => {
 		expect(resolveModel("haiku")?.fallbacks).toBe(false);
 		expect(resolveModel("sonnet")?.fallbacks).toBe(true);

@@ -1,7 +1,7 @@
 import { runAgent, type FetchTopicArticles } from "./agent";
 import { fetchTopicArticles, streamChat as streamClaudeChat } from "./anthropic";
 import { bearerMatches, verifySlackSignature } from "./auth";
-import { ChatError, SYSTEM_PROMPT, buildMessages, parseChatRequest, selectContext, sseEvent, type ChatCall, type ChatEvent } from "./chat";
+import { ChatError, SYSTEM_PROMPT, buildMessages, matchesQuestion, parseChatRequest, selectContext, sseEvent, type ChatCall, type ChatEvent } from "./chat";
 import { queryArticles } from "./db";
 import { DEFAULT_MODEL_ALIAS, MODELS } from "./models";
 import { claimRun } from "./runs";
@@ -150,7 +150,9 @@ export function createHandler(deps: Deps) {
 			})();
 		} else {
 			try {
-				const call: ChatCall = { model, system: SYSTEM_PROMPT, messages: buildMessages(history, articles, question, new Date().toISOString().slice(0, 10)) };
+				const today = new Date().toISOString().slice(0, 10);
+				const loose = !articles.some((a) => matchesQuestion(a, question));
+				const call: ChatCall = { model, system: SYSTEM_PROMPT, messages: buildMessages(history, articles, question, today, loose) };
 				const iterator = (await streamChat(env, call))[Symbol.asyncIterator]();
 				const first = await iterator.next();
 				events = (async function* (): AsyncGenerator<ChatEvent, void, undefined> {

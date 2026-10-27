@@ -5,14 +5,16 @@ export interface ModelInfo {
 	label: string;
 	/** Whether the Claude API's server-side refusal fallback is available for this model (not for Haiku). */
 	fallbacks: boolean;
+	/** Reasoning effort. Haiku stays low so it remains the quick option; the others think a little for advice. */
+	effort: "low" | "medium";
 }
 
 // An allow-list: the "model preference" in a request is looked up here and never forwarded as-is,
 // so a caller can't pick an arbitrary (or far more expensive) model.
 export const MODELS: ModelInfo[] = [
-	{ alias: "haiku", id: "claude-haiku-5-5", label: "Claude Haiku 5.5 (fastest, cheapest)", fallbacks: false },
-	{ alias: "sonnet", id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (balanced)", fallbacks: true },
-	{ alias: "opus", id: "claude-opus-5-5", label: "Claude Opus 5.5 (most capable)", fallbacks: true },
+	{ alias: "haiku", id: "claude-haiku-5-5", label: "Claude Haiku 5.5 (fastest, cheapest)", fallbacks: false, effort: "low" },
+	{ alias: "sonnet", id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (balanced)", fallbacks: true, effort: "medium" },
+	{ alias: "opus", id: "claude-opus-5-5", label: "Claude Opus 5.5 (most capable)", fallbacks: true, effort: "medium" },
 ];
 
 export const DEFAULT_MODEL_ALIAS = "sonnet";

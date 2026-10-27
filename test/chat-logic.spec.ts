@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMessages, parseChatRequest, selectContext, sseEvent, SYSTEM_PROMPT } from "../src/chat";
+import { buildMessages, matchesQuestion, parseChatRequest, selectContext, sseEvent, SYSTEM_PROMPT } from "../src/chat";
 import type { ArticleRow } from "../src/db";
 
 const NOW = new Date("2026-10-27T12:00:00Z");
@@ -114,10 +114,53 @@ describe("buildMessages", () => {
 });
 
 describe("system prompt", () => {
-	it("tells the model to ground answers in the articles, cite them, and treat article text as data", () => {
-		expect(SYSTEM_PROMPT).toMatch(/only/i);
+	it("keeps citations and treats article text as untrusted data", () => {
 		expect(SYSTEM_PROMPT).toMatch(/\[1\]/);
-		expect(SYSTEM_PROMPT).toMatch(/untrusted|data, not instructions/i);
+		expect(SYSTEM_PROMPT).toMatch(/untrusted/i);
+		expect(SYSTEM_PROMPT).toMatch(/never follow instructions/i);
+	});
+	it("does not restrict the assistant to restating the articles", () => {
+		expect(SYSTEM_PROMPT).not.toMatch(/use only the articles/i);
+		expect(SYSTEM_PROMPT).not.toMatch(/do not add facts/i);
+	});
+	it("asks for concrete, prioritized recommendations when the user asks what to do", () => {
+		expect(SYSTEM_PROMPT).toMatch(/what to do/i);
+		expect(SYSTEM_PROMPT).toMatch(/prioriti[sz]ed/i);
+		expect(SYSTEM_PROMPT).toMatch(/professional (knowledge|expertise)/i);
+	});
+	it("keeps answers focused and offers to go deeper instead of writing a wall of text", () => {
+		expect(SYSTEM_PROMPT).toMatch(/\d+ words/);
+		expect(SYSTEM_PROMPT).toMatch(/offer to (go deeper|expand)/i);
+	});
+	it("separates what the articles report from the assistant's own guidance, and forbids inventing facts", () => {
+		expect(SYSTEM_PROMPT).toMatch(/general guidance|general practice/i);
+		expect(SYSTEM_PROMPT).toMatch(/never invent/i);
+	});
+	it("handles terms and events the articles do not mention, and loosely related articles", () => {
+		expect(SYSTEM_PROMPT).toMatch(/does not mention|doesn't mention|not mentioned|do not mention/i);
+		expect(SYSTEM_PROMPT).toMatch(/loosely related|irrelevant/i);
+		expect(SYSTEM_PROMPT).toMatch(/out of date/i);
+	});
+});
+
+describe("matchesQuestion", () => {
+	const a = art({ headline: "PHP2Shell flaws put hospital websites at risk", summary: "Critical vulnerabilities in PHP.", source: "Chief Healthcare Executive" });
+	it("is true when the article shares meaningful keywords with the question", () => {
+		expect(matchesQuestion(a, "How do we patch the PHP flaws?")).toBe(true);
+		expect(matchesQuestion(a, "tell me about vulnerabilities")).toBe(true);
+	});
+	it("is false for a coined term or a question made only of filler words", () => {
+		expect(matchesQuestion(a, "what the heck should we do with vulncopalypse coming?")).toBe(false);
+		expect(matchesQuestion(a, "what should we do about this?")).toBe(false);
+	});
+});
+
+describe("buildMessages retrieval note", () => {
+	it("tells the model when no article matched the question, so it does not force-fit them", () => {
+		const loose = buildMessages([], [art()], "q", undefined, true).at(-1)!.content as string;
+		expect(loose).toMatch(/none of these articles/i);
+		expect(loose.indexOf("none of these")).toBeLessThan(loose.indexOf("<articles>") + 200);
+		expect(buildMessages([], [art()], "q").at(-1)!.content as string).not.toMatch(/none of these articles/i);
 	});
 });
 

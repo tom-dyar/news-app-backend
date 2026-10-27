@@ -112,6 +112,14 @@ describe("POST /chat streaming (default)", () => {
 		expect(call.system).toMatch(/articles/i);
 	});
 
+	it("flags loose retrieval when no stored article matches the question's keywords", async () => {
+		const { handler, cap } = make([DONE]);
+		await handler.fetch(post({ question: "what should we do about vulncopalypse coming?" }), e);
+		expect(cap.calls[0].messages.at(-1).content as string).toMatch(/none of these articles/i);
+		await handler.fetch(post({ question: "tell me about the ransomware attack" }), e);
+		expect(cap.calls[1].messages.at(-1).content as string).not.toMatch(/none of these articles/i);
+	});
+
 	it("scopes retrieval to a topic when asked", async () => {
 		const { handler, cap } = make([DONE]);
 		await handler.fetch(post({ question: "what happened?", topic: "healthcare-ai" }), e);
